@@ -1,0 +1,315 @@
+service: workshop-${self:custom.name}
+
+provider:
+  name: aws
+  runtime: nodejs14.x
+  region: eu-central-1
+  lambdaHashingVersion: 20201221
+  eventBridge:
+    useCloudFormation: true
+  tracing:
+    apiGateway: true
+    lambda: true
+  environment:
+    LOG_LEVEL: ${self:custom.logLevel.${self:custom.stage}, self:custom.logLevel.default}
+    SAMPLE_DEBUG_LOG_RATE: 0.1
+    AWS_NODEJS_CONNECTION_REUSE_ENABLED: 1
+    rest_api_url:
+      Fn::Join:
+        - ""
+        - - https://
+          - !Ref ApiGatewayRestApi
+          - .execute-api.${self:provider.region}.amazonaws.com/${self:custom.stage}
+    serviceName: ${self:service}
+    stage: ${self:custom.stage}
+  iamRoleStatements:
+    - Effect: Allow
+      Action:
+        - "xray:PutTraceSegments"
+        - "xray:PutTelemetryRecords"
+      Resource: "*"
+
+plugins:
+  - serverless-export-env
+  - serverless-export-outputs
+  - serverless-iam-roles-per-function
+
+custom:
+  name: jannik
+  export-env:
+    overwrite: true
+  exportOutputs:
+    include:
+      - E2eTestQueueUrl
+      - CognitoUserPoolServerClientId
+    output:
+      file: ./.env-outputs
+  stage: ${opt:stage, sls:stage}
+  logLevel:
+    prod: INFO
+    default: DEBUG
+  serverless-iam-roles-per-function:
+    defaultInherit: true
+
+functions:
+  get-index:
+    handler: functions/get-index.handler
+    events:
+      - http:
+          path: /
+          method: get
+    iamRoleStatements:
+      - Effect: Allow
+        Action: execute-api:Invoke
+        Resource: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayRestApi}/${self:custom.stage}/GET/restaurants
+    environment:
+      restaurants_api:
+        Fn::Join:
+          - ""
+          - - https://
+            - !Ref ApiGatewayRestApi
+            - .execute-api.${self:provider.region}.amazonaws.com/${self:custom.stage}/restaurants
+      cognito_user_pool_id: !Ref CognitoUserPool
+      cognito_client_id: !Ref WebCognitoUserPoolClient
+      orders_api:
+        Fn::Join:
+          - ""
+          - - https://
+            - !Ref ApiGatewayRestApi
+            - .execute-api.${self:provider.region}.amazonaws.com/${self:custom.stage}/orders
+  get-restaurants:
+    handler: functions/get-restaurants.handler
+    events:
+      - http:
+          path: /restaurants
+          method: get
+          authorizer: aws_iam
+    iamRoleStatements:
+      - Effect: Allow
+        Action: dynamodb:scan
+        Resource: !GetAtt RestaurantsTable.Arn
+      - Effect: Allow
+        Action: ssm:GetParameters*
+        Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${self:service}/${self:custom.stage}/get-restaurants/config
+    environment:
+      restaurants_table: !Ref RestaurantsTable
+  search-restaurants:
+    handler: functions/search-restaurants.handler
+    events:
+      - http:
+          path: /restaurants/search
+          method: post
+          authorizer:
+            name: CognitoAuthorizer
+            type: COGNITO_USER_POOLS
+            arn: !GetAtt CognitoUserPool.Arn
+    iamRoleStatements:
+      - Effect: Allow
+        Action: dynamodb:scan
+        Resource: !GetAtt RestaurantsTable.Arn
+      - Effect: Allow
+        Action: ssm:GetParameters*
+        Resource:
+          - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${self:service}/${self:custom.stage}/search-restaurants/config
+          - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/${self:service}/${self:custom.stage}/search-restaurants/secretString
+      - Effect: Allow
+        Action: kms:Decrypt
+        Resource: ${ssm:/workshop-jannik/dev/kmsArn}
+    environment:
+      restaurants_table: !Ref RestaurantsTable
+  place-order:
+    handler: functions/place-order.handler
+    events:
+      - http:
+          path: /orders
+          method: post
+          authorizer:
+            name: CognitoAuthorizer
+            type: COGNITO_USER_POOLS
+            arn: !GetAtt CognitoUserPool.Arn
+    iamRoleStatements:
+      - Effect: Allow
+        Action: events:PutEvents
+        Resource: !GetAtt EventBus.Arn
+    environment:
+      bus_name: !Ref EventBus
+  notify-restaurant:
+    handler: functions/notify-restaurant.handler
+    events:
+      - eventBridge:
+          eventBus: !Ref EventBus
+          pattern:
+            source:
+              - big-mouth
+            detail-type:
+              - order_placed
+    iamRoleStatements:
+      - Effect: Allow
+        Action: events:PutEvents
+        Resource: !GetAtt EventBus.Arn
+      - Effect: Allow
+        Action: sns:Publish
+        Resource: !Ref RestaurantNotificationTopic
+    environment:
+      bus_name: !Ref EventBus
+      restaurant_notification_topic: !Ref RestaurantNotificationTopic
+
+resources:
+  Conditions:
+    IsE2eTest:
+      Fn::Equals:
+        - ${self:custom.stage}
+        - dev
+  Resources:
+    RestaurantsTable:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - AttributeName: name
+            AttributeType: S
+        KeySchema:
+          - AttributeName: name
+            KeyType: HASH
+    CognitoUserPool:
+      Type: AWS::Cognito::UserPool
+      Properties:
+        AliasAttributes:
+          - email
+        UsernameConfiguration:
+          CaseSensitive: false
+        AutoVerifiedAttributes:
+          - email
+        Policies:
+          PasswordPolicy:
+            MinimumLength: 8
+            RequireLowercase: true
+            RequireNumbers: true
+            RequireUppercase: true
+            RequireSymbols: true
+        Schema:
+          - AttributeDataType: String
+            Mutable: true
+            Name: given_name
+            Required: true
+            StringAttributeConstraints:
+              MinLength: "1"
+          - AttributeDataType: String
+            Mutable: true
+            Name: family_name
+            Required: true
+            StringAttributeConstraints:
+              MinLength: "1"
+          - AttributeDataType: String
+            Mutable: true
+            Name: email
+            Required: true
+            StringAttributeConstraints:
+              MinLength: "1"
+    WebCognitoUserPoolClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: web
+        UserPoolId: !Ref CognitoUserPool
+        ExplicitAuthFlows:
+          - ALLOW_USER_SRP_AUTH
+          - ALLOW_REFRESH_TOKEN_AUTH
+        PreventUserExistenceErrors: ENABLED
+    ServerCognitoUserPoolClient:
+      Type: AWS::Cognito::UserPoolClient
+      Properties:
+        ClientName: server
+        UserPoolId: !Ref CognitoUserPool
+        ExplicitAuthFlows:
+          - ALLOW_ADMIN_USER_PASSWORD_AUTH
+          - ALLOW_REFRESH_TOKEN_AUTH
+        PreventUserExistenceErrors: ENABLED
+    EventBus:
+      Type: AWS::Events::EventBus
+      Properties:
+        Name: order_events_${self:custom.stage}_${self:custom.name}
+    RestaurantNotificationTopic:
+      Type: AWS::SNS::Topic
+    E2eTestQueue:
+      Type: AWS::SQS::Queue
+      Condition: IsE2eTest
+      Properties:
+        MessageRetentionPeriod: 60
+        VisibilityTimeout: 1
+    E2eTestQueuePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Condition: IsE2eTest
+      Properties:
+        Queues:
+          - !Ref E2eTestQueue
+        PolicyDocument:
+          Version: "2012-10-17"
+          Statement:
+            - Effect: Allow
+              Principal: "*"
+              Action: SQS:SendMessage
+              Resource: !GetAtt E2eTestQueue.Arn
+              Condition:
+                ArnEquals:
+                  aws:SourceArn: !Ref RestaurantNotificationTopic
+            - Effect: Allow
+              Principal: "*"
+              Action: SQS:SendMessage
+              Resource: !GetAtt E2eTestQueue.Arn
+              Condition:
+                ArnEquals:
+                  aws:SourceArn: !GetAtt E2eTestEventBridgeRule.Arn
+    E2eTestSnsSubscription:
+      Type: AWS::SNS::Subscription
+      Condition: IsE2eTest
+      Properties:
+        Protocol: sqs
+        Endpoint: !GetAtt E2eTestQueue.Arn
+        RawMessageDelivery: false
+        Region: !Ref AWS::Region
+        TopicArn: !Ref RestaurantNotificationTopic
+    E2eTestEventBridgeRule:
+      Type: AWS::Events::Rule
+      Condition: IsE2eTest
+      Properties:
+        EventBusName: !Ref EventBus
+        EventPattern:
+          source: [ "big-mouth" ]
+        State: ENABLED
+        Targets:
+          - Arn: !GetAtt E2eTestQueue.Arn
+            Id: e2eTestQueue
+            InputTransformer:
+              InputPathsMap:
+                source: "$.source"
+                detailType: "$.detail-type"
+                detail: "$.detail"
+              InputTemplate: !Sub >
+                {
+                  "event": {
+                    "source": <source>,
+                    "detail-type": <detailType>,
+                    "detail": <detail>
+                  },
+                  "eventBusName": "${EventBus}"
+                }
+  Outputs:
+    RestaurantsTableName:
+      Value: !Ref RestaurantsTable
+    CognitoUserPoolId:
+      Value: !Ref CognitoUserPool
+    CognitoUserPoolArn:
+      Value: !GetAtt CognitoUserPool.Arn
+    CognitoUserPoolWebClientId:
+      Value: !Ref WebCognitoUserPoolClient
+    CognitoUserPoolServerClientId:
+      Value: !Ref ServerCognitoUserPoolClient
+    EventBusName:
+      Value: !Ref EventBus
+    RestaurantNotificationTopicName:
+      Value: !GetAtt RestaurantNotificationTopic.TopicName
+    RestaurantNotificationTopicArn:
+      Value: !Ref RestaurantNotificationTopic
+    E2eTestQueueUrl:
+      Condition: IsE2eTest
+      Value: !Ref E2eTestQueue

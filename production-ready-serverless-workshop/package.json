@@ -1,0 +1,43 @@
+{
+  "name": "production-ready-serverless-workshop",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "sls": "serverless",
+    "dotEnv": "sls export-env --all",
+    "test": "npm run dotEnv && cross-env TEST_MODE=handler jest",
+    "acceptance": "npm run dotEnv && cross-env TEST_MODE=http jest"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/jest": "^27.0.3",
+    "aws-sdk": "^2.1045.0",
+    "awscred": "^1.5.0",
+    "cheerio": "^1.0.0-rc.10",
+    "cross-env": "^7.0.3",
+    "dotenv": "^10.0.0",
+    "jest": "^27.4.3",
+    "rxjs": "^7.4.0",
+    "serverless": "^2.68.0",
+    "serverless-export-env": "^2.0.0",
+    "serverless-export-outputs": "^1.0.2",
+    "serverless-iam-roles-per-function": "^3.2.0"
+  },
+  "dependencies": {
+    "@dazn/lambda-powertools-correlation-ids": "^1.28.1",
+    "@dazn/lambda-powertools-eventbridge-client": "^1.28.1",
+    "@dazn/lambda-powertools-logger": "^1.28.1",
+    "@dazn/lambda-powertools-pattern-basic": "^1.29.0",
+    "@middy/core": "^2.5.3",
+    "@middy/ssm": "^2.5.3",
+    "aws-xray-sdk-core": "^3.3.4",
+    "aws4": "^1.11.0",
+    "axios": "^0.24.0",
+    "chance": "^1.1.8",
+    "lodash": "^4.17.21",
+    "mustache": "^4.2.0"
+  }
+}
